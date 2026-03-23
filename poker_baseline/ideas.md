@@ -33,7 +33,7 @@ def decide(self, to_call):
 ```
 
 faudrait:
-- un wrapper pour l'api (openai ou anthropic)
+- un wrapper pour l'api (openai ou claude)
 - parser la réponse du LLM (il va pas toujours répondre proprement)
 - comparer les performances LLM vs stratégie rule-based
 - attention au coût des appels API si on fait tourner beaucoup de mains
