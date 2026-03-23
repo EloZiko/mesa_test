@@ -1,50 +1,95 @@
-"""Agents for the poker baseline example."""
-
 import mesa
 
 
 RANKS = "23456789TJQKA"
+SUITS = "CDHS"
 
 
-def card_value(card: str) -> int:
+def card_value(card):
     return RANKS.index(card[0])
 
 
-def hand_strength(card_1: str, card_2: str) -> int:
-    # Simple pre-flop heuristic: high card + pair bonus.
-    score = max(card_value(card_1), card_value(card_2))
-    if card_1[0] == card_2[0]:
-        score += 5
+def hand_strength(cards):
+    if len(cards) < 2:
+        return 0
+    v1 = card_value(cards[0])
+    v2 = card_value(cards[1])
+    score = max(v1, v2)
+    if cards[0][0] == cards[1][0]:
+        score += 6
+    if cards[0][1] == cards[1][1]:
+        score += 2
+    if abs(v1 - v2) <= 2:
+        score += 1
     return score
 
 
 class PokerPlayer(mesa.Agent):
-    def __init__(self, model: mesa.Model, name: str, stack: int = 100) -> None:
+    def __init__(self, model, name, stack=100, style="normal"):
         super().__init__(model)
         self.name = name
         self.stack = stack
-        self.cards: list[str] = []
-        self.folded = False
-        self.current_bet = 0
-
-    def reset_for_hand(self) -> None:
+        self.style = style
         self.cards = []
         self.folded = False
         self.current_bet = 0
+        self.wins = 0
+        self.hands_played = 0
+        self.is_all_in = False
+        self.last_action = ""
 
-    def decide_action(self, to_call: int) -> tuple[str, int]:
+    def reset_hand(self):
+        self.cards = []
+        self.folded = False
+        self.current_bet = 0
+        self.is_all_in = False
+        self.last_action = ""
+
+    def decide(self, to_call):
         if self.folded or self.stack <= 0:
             return ("fold", 0)
 
-        score = hand_strength(self.cards[0], self.cards[1])
+        strength = hand_strength(self.cards)
 
+        if self.style == "tight":
+            return self._tight_strategy(strength, to_call)
+        elif self.style == "loose":
+            return self._loose_strategy(strength, to_call)
+        else:
+            return self._normal_strategy(strength, to_call)
+
+    def _normal_strategy(self, strength, to_call):
         if to_call == 0:
-            if score >= 10 and self.stack >= 4:
+            if strength >= 10 and self.stack >= 4:
                 return ("raise", 4)
             return ("check", 0)
-
-        if score >= 11 and self.stack >= to_call + 4:
+        if strength >= 11 and self.stack >= to_call + 4:
             return ("raise", to_call + 4)
-        if score >= 8 and self.stack >= to_call:
+        if strength >= 7 and self.stack >= to_call:
             return ("call", to_call)
+        return ("fold", 0)
+
+    def _tight_strategy(self, strength, to_call):
+        if to_call == 0:
+            if strength >= 12:
+                return ("raise", 6)
+            return ("check", 0)
+        if strength >= 12 and self.stack >= to_call + 6:
+            return ("raise", to_call + 6)
+        if strength >= 9 and self.stack >= to_call:
+            return ("call", to_call)
+        return ("fold", 0)
+
+    def _loose_strategy(self, strength, to_call):
+        bluff = self.model.random.random() < 0.15
+        if to_call == 0:
+            if strength >= 8 or bluff:
+                bet = min(self.stack, 4)
+                return ("raise", bet)
+            return ("check", 0)
+        if strength >= 5 or bluff:
+            if strength >= 10 and self.stack >= to_call + 4:
+                return ("raise", to_call + 4)
+            if self.stack >= to_call:
+                return ("call", to_call)
         return ("fold", 0)

@@ -1,15 +1,20 @@
-"""Run a tiny demo of the poker baseline model."""
-
-from mesa.examples.basic.poker_baseline.model import PokerTable
+from model import PokerTable
 
 
-def main() -> None:
-    model = PokerTable(seed=42, starting_stack=100)
+def main():
+    model = PokerTable(num_players=4, starting_stack=100, rng=42)
 
-    for hand_idx in range(1, 6):
-        winner = model.play_one_hand()
-        stacks = {player.name: player.stack for player in model.players}
-        print(f"Hand {hand_idx}: winner={winner.name}, pot={model.pot}, stacks={stacks}")
+    for _ in range(20):
+        model.step()
+        if not model.running:
+            break
+
+    print(f"\nAfter {model.hand_number} hands:")
+    for p in model.players:
+        status = "OUT" if p.stack <= 0 else f"${p.stack}"
+        print(f"  {p.name} ({p.style}): {status} - {p.wins} wins")
+
+    print(f"\nLast hand won by: {model.last_winner}")
 
 
 if __name__ == "__main__":

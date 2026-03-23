@@ -1,121 +1,261 @@
-"""Simple two-player poker table model (step 1 baseline)."""
-
 import mesa
+from mesa.datacollection import DataCollector
 
-from mesa.examples.basic.poker_baseline.agents import PokerPlayer, RANKS, hand_strength
+from agents import PokerPlayer, RANKS, hand_strength
 
 SUITS = "CDHS"
 
 
-class PokerTable(mesa.Model):
-    def __init__(self, seed: int | None = 42, starting_stack: int = 100) -> None:
-        super().__init__(rng=seed)
-        self.starting_stack = starting_stack
+def avg_stack(model):
+    stacks = [p.stack for p in model.players if p.stack > 0]
+    if not stacks:
+        return 0
+    return sum(stacks) / len(stacks)
 
-        self.players = [
-            PokerPlayer(self, "Novice", stack=starting_stack),
-            PokerPlayer(self, "Expert", stack=starting_stack),
-        ]
+
+def players_alive(model):
+    return sum(1 for p in model.players if p.stack > 0)
+
+
+def biggest_stack(model):
+    return max(p.stack for p in model.players)
+
+
+class PokerTable(mesa.Model):
+    def __init__(self, num_players=4, starting_stack=100, small_blind=1, rng=None):
+        super().__init__(rng=rng)
+        self.starting_stack = starting_stack
+        self.small_blind = small_blind
+        self.big_blind = small_blind * 2
+        self.num_players = num_players
+
+        styles = ["normal", "tight", "loose"]
+        names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank"]
+
+        self.players = []
+        for i in range(num_players):
+            style = styles[i % len(styles)]
+            p = PokerPlayer(self, names[i], stack=starting_stack, style=style)
+            self.players.append(p)
 
         self.pot = 0
         self.current_bet = 0
-        self.deck: list[str] = []
-        self.hand_over = False
+        self.community_cards = []
+        self.deck = []
+        self.hand_number = 0
+        self.dealer_idx = 0
+        self.last_winner = ""
+        self.last_pot = 0
+        self.hand_log = []
 
-    def build_deck(self) -> None:
-        self.deck = [rank + suit for rank in RANKS for suit in SUITS]
+        self.datacollector = DataCollector(
+            model_reporters={
+                "Avg Stack": avg_stack,
+                "Players Alive": players_alive,
+                "Biggest Stack": biggest_stack,
+                "Pot": "last_pot",
+            },
+            agent_reporters={"Stack": "stack", "Wins": "wins"},
+        )
+        self.datacollector.collect(self)
+
+    def build_deck(self):
+        self.deck = [r + s for r in RANKS for s in SUITS]
         self.random.shuffle(self.deck)
 
-    def deal_private_cards(self) -> None:
-        for player in self.players:
-            player.reset_for_hand()
-            player.cards = [self.deck.pop(), self.deck.pop()]
+    def active_players(self):
+        return [p for p in self.players if not p.folded and p.stack > 0]
 
-    def post_blinds(self) -> None:
-        small_blind, big_blind = 1, 2
-        sb, bb = self.players[0], self.players[1]
+    def deal_cards(self):
+        for p in self.players:
+            p.reset_hand()
+            if p.stack > 0:
+                p.cards = [self.deck.pop(), self.deck.pop()]
+                p.hands_played += 1
+            else:
+                p.folded = True
 
-        for player, blind in ((sb, small_blind), (bb, big_blind)):
-            paid = min(player.stack, blind)
-            player.stack -= paid
-            player.current_bet += paid
-            self.pot += paid
-
-        self.current_bet = big_blind
-
-    def apply_action(self, player: PokerPlayer, action_kind: str, amount: int = 0) -> None:
-        to_call = self.current_bet - player.current_bet
-
-        if action_kind == "fold":
-            player.folded = True
+    def post_blinds(self):
+        alive = [p for p in self.players if p.stack > 0]
+        if len(alive) < 2:
             return
 
-        if action_kind == "check":
+        sb_idx = (self.dealer_idx + 1) % len(self.players)
+        bb_idx = (self.dealer_idx + 2) % len(self.players)
+
+        while self.players[sb_idx].stack <= 0:
+            sb_idx = (sb_idx + 1) % len(self.players)
+        while self.players[bb_idx].stack <= 0 or bb_idx == sb_idx:
+            bb_idx = (bb_idx + 1) % len(self.players)
+
+        sb_player = self.players[sb_idx]
+        bb_player = self.players[bb_idx]
+
+        sb_amt = min(sb_player.stack, self.small_blind)
+        sb_player.stack -= sb_amt
+        sb_player.current_bet = sb_amt
+        self.pot += sb_amt
+
+        bb_amt = min(bb_player.stack, self.big_blind)
+        bb_player.stack -= bb_amt
+        bb_player.current_bet = bb_amt
+        self.pot += bb_amt
+
+        self.current_bet = self.big_blind
+
+    def betting_round(self):
+        active = self.active_players()
+        if len(active) <= 1:
             return
 
-        if action_kind == "call":
-            paid = min(player.stack, to_call)
-            player.stack -= paid
-            player.current_bet += paid
-            self.pot += paid
-            return
+        last_raiser = None
+        players_acted = set()
 
-        if action_kind == "raise":
-            paid = min(player.stack, amount)
-            player.stack -= paid
-            player.current_bet += paid
-            self.current_bet = max(self.current_bet, player.current_bet)
-            self.pot += paid
+        for _ in range(len(active) * 3):
+            for p in active:
+                if p.folded or p.is_all_in:
+                    continue
+                if p == last_raiser and p.unique_id in players_acted:
+                    return
 
-    def betting_round(self) -> None:
-        for player in self.players:
-            if player.folded:
-                continue
-            to_call = self.current_bet - player.current_bet
-            action_kind, amount = player.decide_action(to_call)
-            self.apply_action(player, action_kind, amount)
+                to_call = self.current_bet - p.current_bet
+                action, amount = p.decide(to_call)
 
-    def payout_to_winner(self, winner: PokerPlayer) -> None:
-        winner.stack += self.pot
+                if action == "fold":
+                    p.folded = True
+                    p.last_action = "fold"
+                elif action == "check":
+                    p.last_action = "check"
+                elif action == "call":
+                    paid = min(p.stack, to_call)
+                    p.stack -= paid
+                    p.current_bet += paid
+                    self.pot += paid
+                    if p.stack == 0:
+                        p.is_all_in = True
+                    p.last_action = "call"
+                elif action == "raise":
+                    paid = min(p.stack, amount)
+                    p.stack -= paid
+                    p.current_bet += paid
+                    self.current_bet = max(self.current_bet, p.current_bet)
+                    self.pot += paid
+                    last_raiser = p
+                    if p.stack == 0:
+                        p.is_all_in = True
+                    p.last_action = "raise"
 
-    def showdown_or_fold_win(self) -> PokerPlayer:
-        active = [player for player in self.players if not player.folded]
+                players_acted.add(p.unique_id)
+
+            if len(self.active_players()) <= 1:
+                return
+
+            all_matched = all(
+                p.current_bet >= self.current_bet or p.is_all_in
+                for p in self.active_players()
+            )
+            if all_matched and len(players_acted) >= len(self.active_players()):
+                return
+
+    def deal_community(self, count):
+        self.deck.pop()
+        for _ in range(count):
+            self.community_cards.append(self.deck.pop())
+
+    def eval_hand(self, player):
+        all_cards = player.cards + self.community_cards
+        score = hand_strength(player.cards)
+
+        for c in self.community_cards:
+            if c[0] == player.cards[0][0] or c[0] == player.cards[1][0]:
+                score += 3
+
+        ranks_in_hand = [c[0] for c in all_cards]
+        for r in RANKS:
+            cnt = ranks_in_hand.count(r)
+            if cnt >= 3:
+                score += 8
+            if cnt >= 4:
+                score += 15
+
+        suits_in_hand = [c[1] for c in all_cards]
+        for s in SUITS:
+            if suits_in_hand.count(s) >= 5:
+                score += 10
+
+        return score
+
+    def showdown(self):
+        active = self.active_players()
+        if len(active) == 0:
+            return None
 
         if len(active) == 1:
             winner = active[0]
-            self.payout_to_winner(winner)
+            winner.stack += self.pot
+            winner.wins += 1
             return winner
 
-        p0, p1 = active
-        s0 = hand_strength(p0.cards[0], p0.cards[1])
-        s1 = hand_strength(p1.cards[0], p1.cards[1])
+        best_score = -1
+        winner = active[0]
+        for p in active:
+            s = self.eval_hand(p)
+            if s > best_score:
+                best_score = s
+                winner = p
 
-        if s0 > s1:
-            winner = p0
-            self.payout_to_winner(winner)
-            return winner
+        winner.stack += self.pot
+        winner.wins += 1
+        return winner
 
-        if s1 > s0:
-            winner = p1
-            self.payout_to_winner(winner)
-            return winner
+    def step(self):
+        alive = [p for p in self.players if p.stack > 0]
+        if len(alive) < 2:
+            self.running = False
+            self.datacollector.collect(self)
+            return
 
-        # Tie: split pot, odd chip goes to first player.
-        split = self.pot // 2
-        p0.stack += split + (self.pot % 2)
-        p1.stack += split
-        return p0
-
-    def play_one_hand(self) -> PokerPlayer:
+        self.hand_number += 1
         self.pot = 0
         self.current_bet = 0
-        self.hand_over = False
+        self.community_cards = []
 
         self.build_deck()
-        self.deal_private_cards()
+        self.deal_cards()
         self.post_blinds()
+
         self.betting_round()
 
-        winner = self.showdown_or_fold_win()
-        self.hand_over = True
-        return winner
+        if len(self.active_players()) > 1:
+            self.deal_community(3)
+            self.current_bet = 0
+            for p in self.active_players():
+                p.current_bet = 0
+            self.betting_round()
+
+        if len(self.active_players()) > 1:
+            self.deal_community(1)
+            self.current_bet = 0
+            for p in self.active_players():
+                p.current_bet = 0
+            self.betting_round()
+
+        if len(self.active_players()) > 1:
+            self.deal_community(1)
+            self.current_bet = 0
+            for p in self.active_players():
+                p.current_bet = 0
+            self.betting_round()
+
+        winner = self.showdown()
+        if winner:
+            self.last_winner = winner.name
+            self.last_pot = self.pot
+            self.hand_log.append({
+                "hand": self.hand_number,
+                "winner": winner.name,
+                "pot": self.pot,
+            })
+
+        self.dealer_idx = (self.dealer_idx + 1) % len(self.players)
+        self.datacollector.collect(self)
